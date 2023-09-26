@@ -227,6 +227,30 @@ The figure below shows how the VNI to be encapsulated in the outgoing packet is 
 
   ![dash-outbound-vni](../../images/dash/dash-hld-outbound-vni.svg)
 	
+### 2.1.1 Routing action and routing type
+
+In DASH pipeline, routing actions are a set of functions that transform the packet in certain way. Each routing action takes a list of specific parameters as input, then transform the packet in a specific way. For example, `staicencap` action will take the `underlay_dip`, `underlay_sip`, `encap_type` and `encap_key` to encapsulate the packet.
+
+To implement a network funtion, we usually need to combine multiple routing actions together. In DASH pipeline, we could create a routing type which holds a list of routing actions. For example, we can create a routing type named `vnet` with only 1 action `staticencap` for VNET routing. Then we can create another routing type named `vnetappliance` with 2 `tunnel` actions for tunneling the VNET traffic to anther place first, which is known as [UDR](https://learn.microsoft.com/en-us/azure/virtual-network/virtual-networks-udr-overview).
+
+### 2.1.2 Routing action parameter evaluation
+
+During the Routing and Mapping stages, when a route/mapping entry is matched, all routing actions listed in the specified routing type will be executed. The parameter for these routing actions will be evaluated along with the matching process. 
+
+This detailed process is designed as below and being P4 compatible, so we could use P4-based implemntation for prootyping and verification, e.g., BMv2 we use today in DASH:
+
+1. In VNI/ENI lookup stage, if an ENI definition is matched, all relevant fields defined in ENI definition and used in the pipeline will be populated as initial metadata.
+2. Once passing the ACL checks, we will start routing and mapping stages, which continue evaluating the routing action parameters.
+3. Entries used by Routing (matching route entry) and Mapping (matching CA-PA mapping or port) can have any routing action parameter specified. When they are matched, all parameters will be populated as metadata and override what we currently have.
+    1. If any metadata is defined in multiple stages, the later ones override the earlier ones, unless stated otherwise for special fields.
+    2. If any metadata is not defined in a stage or defined as default value, it will be ignored, such as IP address with value all 0s. 
+4. Finally, action can also take a set of limited parameters, that will only take effect in this action only.
+    1. Keeping the number of action parameters small is important, because these parameters will be static for all ENIs.
+    2. The best practice should be moving the parameters to the entries in step 3, only keeping the absolutely needed ones here.
+    3. For example, the encap key is better to be defined in the routing / mapping entries, because different ENI might live in different VNET and need different key.
+
+After all parameters are evaluated, we will use the whatever we have in the latest metadata as the routing action parameters to execute all route actions. 
+
 ## 2.2 Inbound packet processing pipeline
 	
    ![dash-inbound](../../images/dash/dash-hld-inbound-packet-processing-pipeline.svg)
@@ -238,6 +262,7 @@ It is worth noting that CA-PA mapping table shall be used for both encap and dec
 ## 2.3 Service Tunnel (ST) and Private Link (PL) packet processing pipelines
 
 ST/PL is employed for scenarios like multiple different customers want to access a common shared resource (e.g storage). This shall not fall into the regular Vnet packet path or Vnet peering path and hence a Private Endpoint is assigned for such accesses, as part of ENI routing or VNET's mapping tables. The lookup happens as described in the above sections, but actions are different. For ST/PL, actions include IPv4 to IPv6 transpositions and special routing/mapping lookups for encapsulation. By having packet transpositions, Service Tunnel feature provides the capability of encoding “region id”, “vnet id”, “subnet id” etc via packet transformation. IPv6 transformation includes last 32 bits of the IPv6 packet as IPv4 address, while the remaining 96 bits of the IPv6 packet is used for encoding. Private Link feature is an extension to Service Tunnel feature and enables customers to access public facing shared services via their private IP addresses within their vnet. More details on traffic flow is captured in the example section.
+
 **ST/PL Inbound flow**: Using the outbound unified flow, the reverse transposition (inbound unified flow) is created. If no inbound flow is created, the packet shall be dropped if it does not match any existing inbound routing rule. There is no inbound policy based lookup expected for ST/PL scenarios. When FastPath kicks in, the respective outbound and inbound unified flows shall be modified accordingly. 
 
 ST encap shall be either nvgre or vxlan. The same encapsulation is expected on the inbound flow. 
@@ -335,6 +360,12 @@ The following are the salient points and requirements. Detailed design for FastP
 | Encap Id                      | Redirect GRE Key/ VXLAN Id    |
 | Custom Redirect Info          | Redirect DIP and Dst Mac      |
 
+## 2.6 ExpressRoute (ER)
+
+ExpressRoute lets you extend your on-premises networks into the Microsoft cloud over a private connection with the help of a connectivity provider. With ExpressRoute, you can establish connections to Microsoft cloud services, such as Microsoft Azure and Microsoft 365. Traffic from ExpressRoute will be encap'ed with VxLan with special VNI key, then DASH pipeline will transform the packet and forward it to its destination, whether it is a VM or a private link service.
+
+More details about the scenario can be found on the [Azure public doc](https://learn.microsoft.com/en-gb/azure/expressroute/expressroute-introduction), and the details on the dash pipeline can be found below in the example configuration section.
+
 # 3 Modules Design
 
 The following are the schema changes. The NorthBound APIs shall be defined as sonic-yang in compliance to [yang-guideline](https://github.com/Azure/SONiC/blob/master/doc/mgmt/SONiC_YANG_Model_Guidelines.md).
@@ -401,8 +432,6 @@ DASH_ENI_TABLE:{{eni}}
     "underlay_ip": {{ip_addr}}
     "admin_state": {{enabled/disabled}}
     "vnet": {{vnet_name}}
-    "pl_sip_encoding": {{string}} (OPTIONAL)
-    "pl_underlay_sip": {{ip_addr}} (OPTIONAL)
     "v4_meter_policy_id": {{string}} (OPTIONAL)
     "v6_meter_policy_id": {{string}} (OPTIONAL)
 ```
@@ -414,11 +443,8 @@ qos                      = Associated Qos profile
 underlay_ip              = PA address for Inbound encapsulation to VM
 admin_state              = Enabled after all configurations are applied. 
 vnet                     = Vnet that ENI belongs to
-pl_sip_encoding          = Private Link encoding for IPv6 SIP transpositions; Format "0xfield_value/0xfull_mask". field_value must be used as a replacement to the
-			   first len(full_mask) bits of pl_sip. Last 32 bits are reserved for the IPv4 CA. Logic: ((pl_sip & !full_mask) | field_value).
-pl_underlay_sip          = Underlay SIP (ST GW VIP) to be used for all private link transformation for this ENI
-v4_meter_policy_id	 = IPv4 meter policy ID
-v6_meter_policy_id	 = IPv6 meter policy ID
+v4_meter_policy_id	     = IPv4 meter policy ID
+v6_meter_policy_id	     = IPv6 meter policy ID
 ```
 
 ### 3.2.4 TAG
@@ -495,37 +521,46 @@ dst_port                 = list of range of destination ports ',' separated;  if
 	
 ```
 DASH_ROUTING_TYPE_TABLE:{{routing_type}}: [
+    {
         "action_name":{{string}}
         "action_type": {{action_type}} 
         "encap_type": {{encap type}} (OPTIONAL)
-        "vni": {{vni}} (OPTIONAL)
-    ]
+        "key": {{encap_key}} (OPTIONAL)
+        "default_routing_type": {{routing_type}} (OPTIONAL)
+    }
+    // ...
+]
 ```
 
 ```
-key                      = DASH_ROUTING_TYPE_TABLE:routing_type; routing type can be {direct, vnet, vnet_direct, vnet_encap, appliance, privatelink, privatelinknsg, servicetunnel, drop}; actions can be a list of action_types
+key                      = DASH_ROUTING_TYPE_TABLE:routing_type; routing type can be {direct, vnet, vnet_direct, vnet_encap, appliance, privatelink, privatelinknsg, privatelinkmap, privatelinknsgmap, privatelinknat, privatelinknsgnat, servicetunnel, drop}; actions can be a list of action_types
 ; field                  = value
 action_name              = action name as string
-action_type              = action_type can be {maprouting, direct, staticencap, appliance, 4to6, mapdecap, decap, drop}
+action_type              = action_type can be {maprouting, portmaprouting, direct, staticencap, appliance, 4to6, 6to4, tunnel, nat, mapdecap, decap, drop}
 encap_type               = encap type depends on the action_type - {vxlan, nvgre}
-vni                      = vni value associated with the corresponding action. Applicable if encap_type is specified. 
+key                      = encap_key, used only by staticencap action_type
+default_routing_type     = default routing type used as catch call routing type when action type maprouting and portmaprouting didn't find any match.
 ```
 
-### 3.2.5.1 ROUTING APPLIANCE
+### 3.2.5.1 ROUTING TUNNEL
 	
 ```
-DASH_ROUTING_APPLIANCE_TABLE:{{appliance_id}}:
-        "appliance_guid":{{string}}
-        "addresses": {{list of addresses}} 
-        "encap_type": {{encap type}}
-        "vni": {{vni}}
+"DASH_ROUTING_TUNNEL_TABLE:{{tunnel_id}}": {
+    "name": {{string}}
+    "dips": {{list of addrsses}}
+    "sip": {{address}}
+    "encap_type": {{encap_type}}
+    "encap_key": {{encap_key}}
+}
 ```
 
 ```
-key                      = DASH_ROUTING_APPLIANCE_TABLE:appliance_id; Used for PL NSG
+key                      = DASH_ROUTING_TUNNEL_TABLE:tunnel_id
 ; field                  = value
-addresses                = list of addresses used for ECMP across appliances
+dips                     = list of addresses used for ECMP across
+sip                      = source ip address, to be used in encap. If not used, we will use the ENI underlay IP.
 encap_type               = encap type depends on the action_type - {vxlan, nvgre}
+encap_key                = encap key, gre key if nvgre, vxlan id if vxlan
 vni                      = vni value associated with the corresponding action.
 ```
 
@@ -534,14 +569,16 @@ vni                      = vni value associated with the corresponding action.
 ```
 DASH_APPLIANCE_TABLE:{{appliance_id}}
     "sip": {{ip_address}}
-    "vm_vni": {{vni}}
+    "outbound_vnis": {{vnis}}
+    "ignore_vnis": {{vnis}}
 ```
 
 ```
 key                      = DASH_APPLIANCE_TABLE:id ; attributes specific for the appliance
 ; field                  = value 
 sip                      = source ip address, to be used in encap
-vm_vni                   = VM VNI that is used for setting direction. Also used for inbound encap to VM
+outbound_vnis            = Outbound VNIs that is used for setting direction.
+ignore_vnis              = VNIs that shows up in the encap and should be ignored during direction setup.
 ```
 
 ### 3.2.8 ROUTE LPM TABLE - OUTBOUND
@@ -556,10 +593,15 @@ DASH_ROUTE_TABLE:{{eni}}:{{prefix}}
     "overlay_dip":{{ip_address}} (OPTIONAL)
     "underlay_sip":{{ip_address}} (OPTIONAL)
     "underlay_dip":{{ip_address}} (OPTIONAL)
+    "4to6_dip_encoding": "{{ip_encoding}}" (OPTIONAL)
+    "4to6_sip_encoding": "{{ip_encoding}}" (OPTIONAL)
+    "6to4_dip_encoding": "{{ip_encoding}}" (OPTIONAL)
+    "6to4_sip_encoding": "{{ip_encoding}}" (OPTIONAL)
+    "port_mapping_id": {{string}} (OPTIONAL)
     "metering_policy_en": {{bool}} (OPTIONAL)
     "metering_class": {{class_id}} (OPTIONAL)
 ```
-  
+
 ```
 key                      = DASH_ROUTE_TABLE:eni:prefix ; ENI route table with CA prefix for packet Outbound
 ; field                  = value 
@@ -571,6 +613,11 @@ overlay_sip              = ip_address                ; overlay ipv6 src ip if ro
 overlay_dip              = ip_address                ; overlay ipv6 dst ip if routing_type is {servicetunnel}, transform last 32 bits from packet (dst ip) 
 underlay_sip             = ip_address                ; underlay ipv4 src ip if routing_type is {servicetunnel}; this is the ST GW VIP (for ST traffic) or custom VIP
 underlay_dip             = ip_address                ; underlay ipv4 dst ip to override if routing_type is {servicetunnel}, use dst ip from packet if not specified
+4to6_dip_encoding        = ip_encoding               ; ipv4 to ipv6 destination ip encoding, used by action {4to6}
+4to6_sip_encoding        = ip_encoding               ; ipv4 to ipv6 source ip encoding, used by action {4to6}
+6to4_dip_encoding        = ip_encoding               ; ipv6 to ipv4 destination ip encoding, used by action {6to4}
+6to4_sip_encoding        = ip_encoding               ; ipv6 to ipv4 source ip encoding, used by action {6to4}
+port_mapping_id          = string                    ; Port mapping id, used by action {portmaprouting}
 metering_policy_en	 = bool                      ; Metering policy lookup enable (optional), default = false
 metering_class           = class_id                  ; Metering class-id, used if metering policy lookup is not enabled
 ```
@@ -587,7 +634,7 @@ DASH_ROUTE_RULE_TABLE:{{eni}}:{{vni}}:{{prefix}}
     "metering_class": {{class_id}} (OPTIONAL) 
     "region": {{region_id}} (OPTIONAL)
 ```
-  
+
 ```
 key                      = DASH_ROUTE_RULE_TABLE:eni:vni:prefix ; ENI Inbound route table with VNI and optional SRC PA prefix
 ; field                  = value 
@@ -609,11 +656,15 @@ DASH_VNET_MAPPING_TABLE:{{vnet}}:{{ip_address}}
     "mac_address":{{mac_address}} (OPTIONAL) 
     "metering_class": {{class_id}} (OPTIONAL)
     "override_meter": {{bool}} (OPTIONAL)
-    "use_dst_vni": {{bool}} (OPTIONAL)
-    "use_pl_sip_eni": {{bool}} (OPTIONAL)
     "overlay_sip":{{ip_address}} (OPTIONAL)
     "overlay_dip":{{ip_address}} (OPTIONAL)
+    "4to6_dip_encoding": "{{ip_encoding}}" (OPTIONAL)
+    "4to6_sip_encoding": "{{ip_encoding}}" (OPTIONAL)
+    "6to4_dip_encoding": "{{ip_encoding}}" (OPTIONAL)
+    "6to4_sip_encoding": "{{ip_encoding}}" (OPTIONAL)
+    "port_mapping_id": {{string}} (OPTIONAL)
 ```
+
 ```
 key                      = DASH_VNET_MAPPING_TABLE:vnet:ip_address ; CA-PA mapping table for Vnet
 ; field                  = value 
@@ -622,12 +673,35 @@ underlay_ip              = ip_address                ; PA address for the CA
 mac_address              = MAC address as string     ; Inner dst mac
 metering_class           = class_id                  ; metering class-id
 override_meter           = bool                      ; override the metering class-id coming from the route table
-use_dst_vni              = bool                      ; if true, use the destination VNET VNI for encap. If false or not specified, use source VNET's VNI
 overlay_sip              = ip_address                ; overlay src ip if routing_type is {privatelink}, transform last 32 bits from packet 
 overlay_dip              = ip_address                ; overlay dst ip if routing_type is {privatelink} 
+4to6_dip_encoding        = ip_encoding               ; ipv4 to ipv6 destination ip encoding, used by action {4to6}
+4to6_sip_encoding        = ip_encoding               ; ipv4 to ipv6 source ip encoding, used by action {4to6}
+6to4_dip_encoding        = ip_encoding               ; ipv6 to ipv4 destination ip encoding, used by action {6to4}
+6to4_sip_encoding        = ip_encoding               ; ipv6 to ipv4 source ip encoding, used by action {6to4}
+port_mapping_id          = string                    ; Port mapping id, used by action {portmaprouting}
 ```
 
-### 3.2.10 METER
+### 3.2.10 PORT MAPPING TABLE
+
+```
+"DASH_PORT_MAPPING_TABLE:<Port Mapping Id>": [
+    {
+        "routing_type": {{routing_type}},
+
+        // Port range to match
+        "src_port_min": {{port}} (OPTIONAL)
+        "src_port_max": {{port}} (OPTIONAL)
+        "dst_port_min": {{port}} (OPTIONAL)
+        "dst_port_max": {{port}} (OPTIONAL)
+
+        // Metadata properties/attributes ...
+    }
+    //, ...
+]
+```
+
+### 3.2.11 METER
 
 ```
 DASH_METER_POLICY:{{meter_policy_id}} 
