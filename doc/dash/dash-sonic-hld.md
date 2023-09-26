@@ -47,6 +47,7 @@
 |  1.4  | 05/03/2023 |    Prince Sunny     | ACL Tagging, ACL Requirements             |
 |  1.5  | 05/22/2023 | Oleksandr Ivantsiv  | Update configuration examples             |
 |  1.6  | 06/01/2023 |    Prince Sunny     | Added FastPath                            |
+|  1.7  | 09/25/2023 |     Riff Jiang      | DASH routing action evaluation, ER<br>scenario, ST/PL updates |
 
 # About this Manual
 This document provides more detailed design of DASH APIs, DASH orchestration agent, Config and APP DB Schemas and other SONiC buildimage changes required to bring up SONiC image on an appliance card. General DASH HLD can be found at [dash_hld](https://github.com/sonic-net/DASH/tree/main/documentation/general/dash-high-level-design.md).
