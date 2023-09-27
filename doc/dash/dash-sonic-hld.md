@@ -361,12 +361,6 @@ The following are the salient points and requirements. Detailed design for FastP
 | Encap Id                      | Redirect GRE Key/ VXLAN Id    |
 | Custom Redirect Info          | Redirect DIP and Dst Mac      |
 
-## 2.6 ExpressRoute (ER)
-
-ExpressRoute lets you extend your on-premises networks into the Microsoft cloud over a private connection with the help of a connectivity provider. With ExpressRoute, you can establish connections to Microsoft cloud services, such as Microsoft Azure and Microsoft 365. Traffic from ExpressRoute will be encap'ed with VxLan with special VNI key, then DASH pipeline will transform the packet and forward it to its destination, whether it is a VM or a private link service.
-
-More details about the scenario can be found on the [Azure public doc](https://learn.microsoft.com/en-gb/azure/expressroute/expressroute-introduction), and the details on the dash pipeline can be found below in the example configuration section.
-
 # 3 Modules Design
 
 The following are the schema changes. The NorthBound APIs shall be defined as sonic-yang in compliance to [yang-guideline](https://github.com/Azure/SONiC/blob/master/doc/mgmt/SONiC_YANG_Model_Guidelines.md).
